@@ -2,769 +2,586 @@ import os
 import re
 import shutil
 import subprocess
-import zipfile
+import tempfile
 import uuid
+import zipfile
 from pathlib import Path
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, jsonify, request, send_file, render_template_string
 
 app = Flask(__name__)
 
-BASE = Path("/tmp/buttonrush-builder")
-BASE.mkdir(parents=True, exist_ok=True)
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 
-MAX_UPLOAD = 50 * 1024 * 1024
-TIMEOUT = 300
+JOBS_DIR = Path("/tmp/dsi_builder_jobs")
+JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
-DEVKITPRO = "/opt/devkitpro"
-DEVKITARM = "/opt/devkitpro/devkitARM"
-
-TOOL_PATHS = [
-    "/opt/devkitpro/tools/bin",
-    "/opt/devkitpro/devkitARM/bin",
-    "/opt/devkitpro/pacman/bin",
-    "/opt/devkitpro/portlibs/nds/bin",
-]
+BUILD_TIMEOUT = 300
 
 
-def get_environment():
-    env = os.environ.copy()
-    env["DEVKITPRO"] = DEVKITPRO
-    env["DEVKITARM"] = DEVKITARM
-
-    current_path = env.get("PATH", "")
-    env["PATH"] = ":".join(TOOL_PATHS) + ":" + current_path
-
-    return env
-
-
-def find_tool(name):
-    env = get_environment()
-
-    path = shutil.which(name, path=env["PATH"])
-
-    if path:
-        return path
-
-    known_paths = {
-        "ndstool": "/opt/devkitpro/tools/bin/ndstool",
-        "make": "/usr/bin/make",
-        "arm-none-eabi-gcc":
-            "/opt/devkitpro/devkitARM/bin/arm-none-eabi-gcc",
-    }
-
-    path = known_paths.get(name)
-
-    if path and os.path.isfile(path):
-        return path
-
-    return None
-
-
-def safe_extract(zf, dest):
-    root = dest.resolve()
-
-    for info in zf.infolist():
-        name = info.filename.replace("\\", "/")
-
-        if name.startswith("/") or ".." in Path(name).parts:
-            raise ValueError("ZIP inválido: caminho inseguro.")
-
-        target = (dest / name).resolve()
-
-        if not str(target).startswith(str(root) + os.sep) and target != root:
-            raise ValueError("ZIP inválido: caminho inseguro.")
-
-    zf.extractall(dest)
-
-
-def find_project(root):
-    makefiles = list(root.rglob("Makefile"))
-
-    if not makefiles:
-        return None
-
-    makefiles.sort(
-        key=lambda p: (
-            0 if (p.parent / "source").exists() else 1,
-            len(p.parts)
-        )
-    )
-
-    return makefiles[0].parent
-
-
-def run_build(project, log_file):
-    env = get_environment()
-
-    make_path = find_tool("make")
-
-    if not make_path:
-        raise RuntimeError(
-            "Não encontrei o comando make no servidor."
-        )
-
-    proc = subprocess.run(
-        [make_path, "-j2"],
-        cwd=project,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        timeout=TIMEOUT
-    )
-
-    log_file.write_text(
-        proc.stdout,
-        encoding="utf-8",
-        errors="replace"
-    )
-
-    return proc.returncode, proc.stdout
-
-
-HTML = r"""
-<!doctype html>
+HTML = """
+<!DOCTYPE html>
 <html lang="pt-BR">
-
 <head>
-
-<meta charset="utf-8">
-
-<meta name="viewport"
-      content="width=device-width,initial-scale=1">
-
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Button Rush DSi Builder</title>
-
 <style>
-
-* {
-    box-sizing: border-box;
-}
-
 body {
-    margin: 0;
-    background: #111;
-    color: #eee;
-    font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+    background:#15161a;
+    color:#fff;
+    font-family:Arial,sans-serif;
+    margin:0;
+    padding:20px;
 }
-
-main {
-    max-width: 680px;
-    margin: auto;
-    padding: 20px 14px 40px;
+.container {
+    max-width:700px;
+    margin:auto;
 }
-
 h1 {
-    font-size: 25px;
-    margin: 8px 0;
+    font-size:30px;
 }
-
-.sub {
-    color: #aaa;
-    margin-top: 0;
-}
-
 .card {
-    background: #1d1d1d;
-    border: 1px solid #333;
-    border-radius: 14px;
-    padding: 16px;
-    margin: 14px 0;
+    background:#222328;
+    border:1px solid #333;
+    border-radius:18px;
+    padding:20px;
+    margin-top:20px;
 }
-
-label {
-    display: block;
-    font-weight: 700;
-    margin-bottom: 10px;
-}
-
 input {
-    width: 100%;
-    padding: 12px;
-    background: #292929;
-    color: #fff;
-    border-radius: 10px;
-    border: 1px solid #555;
+    width:100%;
+    box-sizing:border-box;
+    padding:14px;
+    border-radius:10px;
+    border:1px solid #555;
+    background:#18191d;
+    color:white;
 }
-
-.checks {
-    font-size: 14px;
-    margin-top: 8px;
-    color: #bbb;
-}
-
-.ok {
-    color: #7ee787;
-}
-
-.bad {
-    color: #ff7b72;
-}
-
 button {
-    width: 100%;
-    margin-top: 14px;
-    padding: 14px;
-    border: 0;
-    border-radius: 10px;
-    background: #eee;
-    color: #111;
-    font-weight: 800;
-    font-size: 16px;
+    width:100%;
+    padding:16px;
+    margin-top:15px;
+    border:0;
+    border-radius:12px;
+    font-size:18px;
+    font-weight:bold;
+    cursor:pointer;
 }
-
-button:disabled {
-    opacity: .45;
+#status {
+    margin-top:15px;
+    font-size:17px;
 }
-
-.download {
-    display: block;
-    text-align: center;
-    margin-top: 14px;
-    padding: 14px;
-    border-radius: 10px;
-    background: #eee;
-    color: #111;
-    text-decoration: none;
-    font-weight: 800;
+a.download {
+    display:block;
+    margin-top:20px;
+    padding:16px;
+    background:white;
+    color:#111;
+    text-align:center;
+    border-radius:12px;
+    font-weight:bold;
+    text-decoration:none;
 }
-
-.bar {
-    height: 10px;
-    background: #333;
-    border-radius: 20px;
-    overflow: hidden;
+.ok {
+    color:#62e87b;
 }
-
-.bar span {
-    display: block;
-    height: 100%;
-    width: 0;
-    background: #eee;
-    transition: width .3s;
+.error {
+    color:#ff7070;
 }
-
-.info {
-    color: #ccc;
-}
-
-.info ol {
-    padding-left: 22px;
-    line-height: 1.7;
-}
-
-#filename {
-    margin-top: 8px;
-    color: #aaa;
-    font-size: 14px;
-    word-break: break-all;
-}
-
-pre {
-    white-space: pre-wrap;
-    max-height: 300px;
-    overflow: auto;
-    background: #090909;
-    border-radius: 10px;
-    padding: 12px;
-    font-size: 12px;
-    margin-top: 12px;
-}
-
 </style>
-
 </head>
-
 <body>
-
-<main>
+<div class="container">
 
 <h1>🎮 Button Rush DSi Builder</h1>
+<p>ZIP → verificar → compilar → .NDS</p>
 
-<p class="sub">
-ZIP → verificar → compilar → .NDS
-</p>
+<div class="card">
+<h2>📦 Projeto C/Makefile em ZIP</h2>
 
-<section class="card">
+<input id="file" type="file" accept=".zip">
 
-<div id="status">
-🔄 Verificando ambiente...
+<button onclick="build()">⚙️ Compilar para .NDS</button>
+
+<div id="status"></div>
+
+<div id="download"></div>
 </div>
 
-<div id="checks" class="checks"></div>
-
-</section>
-
-<section class="card">
-
-<label for="project">
-📦 Projeto C/Makefile em ZIP
-</label>
-
-<input
-    id="project"
-    type="file"
-    accept=".zip,application/zip"
->
-
-<div id="filename">
-Nenhum arquivo escolhido
+<div class="card">
+<h2>Como funciona</h2>
+<p>1. Escolha o ZIP do projeto C.</p>
+<p>2. O Builder procura o Makefile.</p>
+<p>3. O servidor usa devkitARM/libnds.</p>
+<p>4. Se der certo, aparece o .nds.</p>
 </div>
 
-<button id="build" disabled>
-⚙️ Compilar para .NDS
-</button>
-
-<div id="progress" hidden>
-
-<div class="bar">
-<span id="bar"></span>
 </div>
-
-<p id="progressText">
-Enviando...
-</p>
-
-</div>
-
-<pre id="log" hidden></pre>
-
-<a
-    id="download"
-    class="download"
-    hidden
->
-⬇️ Baixar ButtonRush.nds
-</a>
-
-</section>
-
-<section class="card info">
-
-<b>Como funciona</b>
-
-<ol>
-<li>Escolha o ZIP do projeto C.</li>
-<li>O Builder procura o Makefile.</li>
-<li>O servidor usa devkitARM/libnds.</li>
-<li>Se der certo, aparece o .nds.</li>
-</ol>
-
-</section>
 
 <script>
+async function build() {
 
-const file =
-    document.getElementById("project");
+    const file = document.getElementById("file").files[0];
+    const status = document.getElementById("status");
+    const download = document.getElementById("download");
 
-const nameBox =
-    document.getElementById("filename");
+    download.innerHTML = "";
 
-const build =
-    document.getElementById("build");
-
-const status =
-    document.getElementById("status");
-
-const checks =
-    document.getElementById("checks");
-
-const progress =
-    document.getElementById("progress");
-
-const bar =
-    document.getElementById("bar");
-
-const progressText =
-    document.getElementById("progressText");
-
-const log =
-    document.getElementById("log");
-
-const download =
-    document.getElementById("download");
-
-
-async function health() {
-
-    try {
-
-        const response =
-            await fetch("/api/health");
-
-        const data =
-            await response.json();
-
-        status.textContent =
-            data.ok
-            ? "✅ Ambiente pronto para compilar"
-            : "⚠️ Ambiente incompleto";
-
-        checks.innerHTML =
-            Object.entries(data.checks)
-            .map(([key, value]) => {
-
-                return (
-                    '<div class="' +
-                    (value ? "ok" : "bad") +
-                    '">' +
-                    (value ? "✓" : "✗") +
-                    " " +
-                    key +
-                    "</div>"
-                );
-
-            })
-            .join("");
-
-        build.disabled = !data.ok;
-
-    } catch (error) {
-
-        status.textContent =
-            "❌ Não foi possível verificar o servidor";
-
-        build.disabled = true;
-    }
-}
-
-
-file.addEventListener("change", () => {
-
-    if (file.files[0]) {
-
-        nameBox.textContent =
-            file.files[0].name +
-            " (" +
-            Math.round(
-                file.files[0].size / 1024
-            ) +
-            " KB)";
-
-    } else {
-
-        nameBox.textContent =
-            "Nenhum arquivo escolhido";
-    }
-
-    download.hidden = true;
-    log.hidden = true;
-});
-
-
-build.addEventListener("click", async () => {
-
-    if (!file.files[0]) {
-
-        alert("Escolha um ZIP primeiro.");
+    if (!file) {
+        status.innerHTML = '<span class="error">❌ Escolha um arquivo ZIP.</span>';
         return;
     }
 
-    build.disabled = true;
+    status.innerHTML = "⏳ Enviando e compilando com devkitARM...";
 
-    progress.hidden = false;
-    log.hidden = true;
-    download.hidden = true;
-
-    bar.style.width = "15%";
-
-    progressText.textContent =
-        "Enviando projeto...";
-
-    const formData =
-        new FormData();
-
-    formData.append(
-        "project",
-        file.files[0]
-    );
+    const form = new FormData();
+    form.append("file", file);
 
     try {
 
-        bar.style.width = "35%";
+        const response = await fetch("/api/build", {
+            method: "POST",
+            body: form
+        });
 
-        progressText.textContent =
-            "Compilando com devkitARM...";
+        const data = await response.json();
 
-        const response =
-            await fetch(
-                "/api/build",
-                {
-                    method: "POST",
-                    body: formData
-                }
-            );
-
-        const data =
-            await response.json();
-
-        bar.style.width = "100%";
-
-        if (data.ok) {
-
-            progressText.textContent =
-                "✅ Compilação concluída!";
-
-            download.href =
-                data.file;
-
-            download.hidden = false;
-
-        } else {
-
-            progressText.textContent =
-                "❌ Falha na compilação";
-
-            log.hidden = false;
-
-            log.textContent =
-                data.error +
-                "\n\n" +
-                (data.log || "");
+        if (!response.ok || !data.success) {
+            status.innerHTML =
+                '<span class="error">❌ Erro na compilação.</span><br><pre>' +
+                (data.output || data.error || "Erro desconhecido") +
+                '</pre>';
+            return;
         }
+
+        status.innerHTML =
+            '<span class="ok">✅ Compilação concluída!</span>';
+
+        download.innerHTML =
+            '<a class="download" href="' +
+            data.download +
+            '">⬇️ Baixar ButtonRush.nds</a>';
 
     } catch (error) {
 
-        progressText.textContent =
-            "❌ Erro de conexão";
-
-        log.hidden = false;
-
-        log.textContent =
-            String(error);
-
-    } finally {
-
-        build.disabled = false;
+        status.innerHTML =
+            '<span class="error">❌ Erro de conexão: ' +
+            error.message +
+            '</span>';
     }
-
-});
-
-
-health();
-
+}
 </script>
 
-</main>
-
 </body>
-
 </html>
 """
 
 
-@app.get("/")
+def find_command(name, alternatives=None):
+    """Encontra uma ferramenta no PATH ou em caminhos conhecidos."""
+
+    path = shutil.which(name)
+
+    if path:
+        return path
+
+    alternatives = alternatives or []
+
+    for candidate in alternatives:
+        if Path(candidate).exists():
+            return candidate
+
+    return None
+
+
+def safe_extract(zip_path, destination):
+    """Extrai ZIP com proteção contra Zip Slip."""
+
+    destination = destination.resolve()
+
+    with zipfile.ZipFile(zip_path, "r") as z:
+        for member in z.infolist():
+
+            member_path = (destination / member.filename).resolve()
+
+            if not str(member_path).startswith(str(destination)):
+                raise RuntimeError(
+                    f"Arquivo suspeito no ZIP: {member.filename}"
+                )
+
+        z.extractall(destination)
+
+
+def find_makefile(root):
+    """Procura o Makefile dentro do projeto."""
+
+    for path in root.rglob("Makefile"):
+        if path.is_file():
+            return path
+
+    for path in root.rglob("makefile"):
+        if path.is_file():
+            return path
+
+    return None
+
+
+def find_nds(root):
+    """Procura o arquivo NDS produzido pelo Makefile."""
+
+    candidates = list(root.rglob("*.nds"))
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda p: p.stat().st_mtime,
+        reverse=True
+    )
+
+    return candidates[0]
+
+
+def print_log(message):
+    """Mostra mensagens imediatamente nos logs do Render."""
+
+    print(message, flush=True)
+
+
+@app.route("/")
 def index():
-    return HTML
+    return render_template_string(HTML)
 
 
-@app.get("/api/health")
+@app.route("/api/health")
 def health():
 
-    checks = {}
-    paths = {}
-
-    for cmd in [
-        "make",
+    gcc = find_command(
         "arm-none-eabi-gcc",
-        "ndstool"
-    ]:
+        [
+            "/opt/devkitpro/devkitARM/bin/arm-none-eabi-gcc",
+            "/opt/devkitpro/devkitARM/arm-none-eabi/bin/arm-none-eabi-gcc"
+        ]
+    )
 
-        path = find_tool(cmd)
+    make = find_command(
+        "make",
+        [
+            "/usr/bin/make"
+        ]
+    )
 
-        paths[cmd] = path
-        checks[cmd] = path is not None
+    ndstool = find_command(
+        "ndstool",
+        [
+            "/opt/devkitpro/tools/bin/ndstool"
+        ]
+    )
 
     return jsonify({
-        "ok": all(checks.values()),
-        "checks": checks,
-        "paths": paths,
-        "devkitpro": os.environ.get(
-            "DEVKITPRO",
-            DEVKITPRO
-        ),
-        "devkitarm": os.environ.get(
-            "DEVKITARM",
-            DEVKITARM
-        )
+        "ok": True,
+        "gcc": gcc,
+        "make": make,
+        "ndstool": ndstool,
+        "devkitpro": os.environ.get("DEVKITPRO"),
+        "devkitarm": os.environ.get("DEVKITARM")
     })
 
 
-@app.post("/api/build")
+@app.route("/api/build", methods=["POST"])
 def build():
 
-    uploaded = request.files.get("project")
+    print_log("")
+    print_log("========================================")
+    print_log("🚀 NOVA COMPILAÇÃO BUTTON RUSH")
+    print_log("========================================")
 
-    if (
-        not uploaded
-        or not uploaded.filename.lower().endswith(".zip")
-    ):
+    uploaded = request.files.get("file")
 
+    if uploaded is None:
+        print_log("❌ Nenhum arquivo enviado.")
         return jsonify({
-            "ok": False,
-            "error":
-                "Envie um arquivo .zip de um projeto NDS com Makefile."
+            "success": False,
+            "error": "Nenhum arquivo ZIP enviado."
         }), 400
 
-    data = uploaded.read(MAX_UPLOAD + 1)
-
-    if len(data) > MAX_UPLOAD:
-
+    if not uploaded.filename.lower().endswith(".zip"):
+        print_log("❌ O arquivo não é ZIP.")
         return jsonify({
-            "ok": False,
-            "error":
-                "ZIP muito grande. Limite: 50 MB."
-        }), 413
+            "success": False,
+            "error": "Envie um arquivo .zip."
+        }), 400
 
     job_id = uuid.uuid4().hex
 
-    job = BASE / job_id
-    src = job / "src"
-    out = job / "out"
+    job_dir = JOBS_DIR / job_id
+    zip_dir = job_dir / "upload"
+    project_dir = job_dir / "project"
 
-    job.mkdir()
-    src.mkdir()
-    out.mkdir()
+    job_dir.mkdir(parents=True, exist_ok=True)
+    zip_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
 
-    zip_path = job / "project.zip"
-
-    zip_path.write_bytes(data)
-
-    log_path = job / "build.log"
+    zip_path = zip_dir / "project.zip"
 
     try:
 
-        with zipfile.ZipFile(zip_path) as zf:
+        uploaded.save(zip_path)
 
-            safe_extract(
-                zf,
-                src
-            )
+        print_log(f"📦 ZIP recebido: {uploaded.filename}")
+        print_log(f"📏 Tamanho: {zip_path.stat().st_size} bytes")
+        print_log(f"🆔 Job: {job_id}")
 
-        project = find_project(src)
+        print_log("📂 Extraindo ZIP...")
 
-        if not project:
+        safe_extract(zip_path, project_dir)
+
+        print_log("✅ ZIP extraído.")
+
+        makefile = find_makefile(project_dir)
+
+        if makefile is None:
+            print_log("❌ Makefile não encontrado.")
 
             return jsonify({
-                "ok": False,
-                "error":
-                    "Não encontrei um Makefile no ZIP."
+                "success": False,
+                "error": "Makefile não encontrado no ZIP."
             }), 400
 
-        rc, log = run_build(
-            project,
-            log_path
+        project_root = makefile.parent
+
+        print_log(f"📄 Makefile encontrado: {makefile}")
+        print_log(f"📁 Diretório do projeto: {project_root}")
+
+        gcc = find_command(
+            "arm-none-eabi-gcc",
+            [
+                "/opt/devkitpro/devkitARM/bin/arm-none-eabi-gcc",
+                "/opt/devkitpro/devkitARM/arm-none-eabi/bin/arm-none-eabi-gcc"
+            ]
         )
 
-        nds = sorted(
-            project.rglob("*.nds"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True
+        make = find_command(
+            "make",
+            [
+                "/usr/bin/make"
+            ]
         )
 
-        if rc != 0 or not nds:
+        ndstool = find_command(
+            "ndstool",
+            [
+                "/opt/devkitpro/tools/bin/ndstool"
+            ]
+        )
 
-            tail = (
-                log[-12000:]
-                if log
-                else
-                "Sem saída do compilador."
+        print_log(f"🔧 GCC: {gcc}")
+        print_log(f"🔧 Make: {make}")
+        print_log(f"🔧 ndstool: {ndstool}")
+
+        if not gcc:
+            raise RuntimeError("arm-none-eabi-gcc não encontrado.")
+
+        if not make:
+            raise RuntimeError("make não encontrado.")
+
+        if not ndstool:
+            raise RuntimeError("ndstool não encontrado.")
+
+        env = os.environ.copy()
+
+        extra_paths = [
+            "/opt/devkitpro/tools/bin",
+            "/opt/devkitpro/devkitARM/bin",
+            "/opt/devkitpro/devkitARM/arm-none-eabi/bin",
+            "/opt/devkitpro/pacman/bin",
+            "/opt/devkitpro/portlibs/nds/bin"
+        ]
+
+        old_path = env.get("PATH", "")
+
+        env["PATH"] = ":".join(
+            extra_paths + [old_path]
+        )
+
+        env["DEVKITPRO"] = env.get(
+            "DEVKITPRO",
+            "/opt/devkitpro"
+        )
+
+        env["DEVKITARM"] = env.get(
+            "DEVKITARM",
+            "/opt/devkitpro/devkitARM"
+        )
+
+        print_log("")
+        print_log("========================================")
+        print_log("🛠️ INICIANDO MAKE")
+        print_log("========================================")
+
+        command = [
+            make,
+            "-j2"
+        ]
+
+        print_log(
+            "▶️ Comando: " +
+            " ".join(command)
+        )
+
+        print_log(
+            f"📁 CWD: {project_root}"
+        )
+
+        process = subprocess.Popen(
+            command,
+            cwd=str(project_root),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+
+        output_lines = []
+
+        try:
+
+            for line in iter(process.stdout.readline, ""):
+
+                if line == "":
+                    break
+
+                line = line.rstrip()
+
+                output_lines.append(line)
+
+                # MOSTRA IMEDIATAMENTE NO RENDER
+                print_log("[MAKE] " + line)
+
+            process.stdout.close()
+
+            return_code = process.wait(
+                timeout=BUILD_TIMEOUT
+            )
+
+        except subprocess.TimeoutExpired:
+
+            process.kill()
+
+            print_log(
+                f"⏰ COMPILAÇÃO EXCEDEU {BUILD_TIMEOUT} SEGUNDOS."
             )
 
             return jsonify({
-                "ok": False,
-                "error":
-                    "A compilação falhou.",
-                "log":
-                    tail
-            }), 422
+                "success": False,
+                "error": "A compilação excedeu o tempo limite.",
+                "output": "\n".join(output_lines)
+            }), 504
 
-        artifact = out / "ButtonRush.nds"
+        output = "\n".join(output_lines)
 
-        shutil.copy2(
-            nds[0],
-            artifact
+        print_log("")
+        print_log(
+            f"🏁 MAKE terminou com código: {return_code}"
         )
 
+        if return_code != 0:
+
+            print_log("❌ ERRO DE COMPILAÇÃO!")
+
+            return jsonify({
+                "success": False,
+                "error": "make terminou com erro.",
+                "output": output
+            }), 500
+
+        print_log("✅ MAKE terminou com sucesso.")
+
+        nds_file = find_nds(project_root)
+
+        if nds_file is None:
+
+            print_log(
+                "❌ MAKE terminou, mas nenhum .nds foi encontrado."
+            )
+
+            return jsonify({
+                "success": False,
+                "error": "A compilação terminou, mas nenhum arquivo .nds foi encontrado.",
+                "output": output
+            }), 500
+
+        print_log(
+            f"🎮 NDS ENCONTRADO: {nds_file}"
+        )
+
+        final_name = "ButtonRush.nds"
+
+        final_path = job_dir / final_name
+
+        shutil.copy2(
+            nds_file,
+            final_path
+        )
+
+        print_log(
+            f"✅ ARQUIVO FINAL: {final_path}"
+        )
+
+        print_log("")
+        print_log("========================================")
+        print_log("🎉 BUTTON RUSH COMPILADO COM SUCESSO!")
+        print_log("========================================")
+
         return jsonify({
-            "ok": True,
-            "message":
-                "Compilação concluída!",
-            "job":
-                job_id,
-            "file":
-                f"/api/download/{job_id}"
+            "success": True,
+            "job_id": job_id,
+            "filename": final_name,
+            "download": f"/api/download/{job_id}"
         })
-
-    except subprocess.TimeoutExpired:
-
-        return jsonify({
-            "ok": False,
-            "error":
-                "A compilação demorou mais de 5 minutos e foi interrompida."
-        }), 408
-
-    except zipfile.BadZipFile:
-
-        return jsonify({
-            "ok": False,
-            "error":
-                "O arquivo enviado não é um ZIP válido."
-        }), 400
 
     except Exception as e:
 
+        print_log("")
+        print_log("========================================")
+        print_log("💥 ERRO NO BUILDER")
+        print_log("========================================")
+
+        print_log(str(e))
+
         return jsonify({
-            "ok": False,
-            "error":
-                f"Erro no Builder: {e}"
+            "success": False,
+            "error": str(e)
         }), 500
 
-    finally:
 
-        zip_path.unlink(
-            missing_ok=True
-        )
-
-
-@app.get("/api/download/<job_id>")
+@app.route("/api/download/<job_id>")
 def download(job_id):
 
-    if not re.fullmatch(
-        r"[0-9a-f]{32}",
-        job_id
-    ):
+    job_dir = JOBS_DIR / job_id
+    file_path = job_dir / "ButtonRush.nds"
 
-        return "ID inválido", 400
-
-    artifact = (
-        BASE /
-        job_id /
-        "out" /
-        "ButtonRush.nds"
-    )
-
-    if not artifact.exists():
-
-        return "Arquivo não encontrado", 404
+    if not file_path.exists():
+        return jsonify({
+            "error": "Arquivo NDS não encontrado."
+        }), 404
 
     return send_file(
-        artifact,
+        file_path,
         as_attachment=True,
-        download_name="ButtonRush.nds",
-        mimetype="application/octet-stream"
+        download_name="ButtonRush.nds"
     )
 
 
 if __name__ == "__main__":
 
+    port = int(
+        os.environ.get("PORT", "10000")
+    )
+
     app.run(
         host="0.0.0.0",
-        port=int(
-            os.environ.get(
-                "PORT",
-                "7700"
-            )
-        )
-)
+        port=port,
+        debug=False
+    )
