@@ -680,8 +680,7 @@ def build():
                     tail
             }), 422
 
-        artifact =
-            out / "ButtonRush.nds"
+        artifact = out / "ButtonRush.nds"
 
         shutil.copy2(
             nds[0],
