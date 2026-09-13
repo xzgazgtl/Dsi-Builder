@@ -1,15 +1,17 @@
-# Button Rush DSi Builder - compilador NDS
-# O devkitARM fica dentro do container; não precisa ser instalado no servidor.
 FROM devkitpro/devkitarm:latest
 
 WORKDIR /app
 
-# Ferramentas do DS + Python para o Builder web.
-RUN pacman -Sy --noconfirm nds-dev python python-pip \
-    && pacman -Scc --noconfirm
+# Instala os pacotes Nintendo DS e as ferramentas Python
+RUN dkp-pacman -Sy --noconfirm nds-dev \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/* \
+    && dkp-pacman -Scc --noconfirm
 
 COPY requirements.txt /tmp/requirements.txt
-RUN python -m pip install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
+
+RUN python3 -m pip install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
 
 COPY . /app
 
