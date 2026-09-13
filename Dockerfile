@@ -4,25 +4,25 @@ WORKDIR /app
 
 ENV DEVKITPRO=/opt/devkitpro
 ENV DEVKITARM=/opt/devkitpro/devkitARM
+
 ENV PATH=/opt/devkitpro/devkitARM/bin:/opt/devkitpro/tools/bin:/opt/devkitpro/pacman/bin:/opt/devkitpro/portlibs/nds/bin:/usr/local/bin:/usr/bin:/bin
 
 ENV PYTHONUNBUFFERED=1
 ENV PORT=10000
 
-# Instala as ferramentas e bibliotecas necessárias para Nintendo DS
-RUN dkp-pacman -Sy --noconfirm nds-dev \
-    && dkp-pacman -S --noconfirm ndstool \
-    && echo "=== VERIFICANDO LIBNDS ===" \
-    && find /opt/devkitpro -name "libnds9.a" -print \
-    && test -f /opt/devkitpro/libnds/lib/libnds9.a \
-    && echo "libnds9.a OK" \
+# Instala explicitamente as bibliotecas e ferramentas do Nintendo DS
+RUN dkp-pacman -Sy --noconfirm \
+        libnds \
+        ndstool \
     && dkp-pacman -Scc --noconfirm
 
-# Garante que o ndstool esteja disponível no PATH
-RUN find /opt/devkitpro -type f -name ndstool \
-    -exec ln -sf {} /usr/local/bin/ndstool \; || true
+# Confirma que a biblioteca necessária para -lnds9 realmente existe
+RUN echo "=== VERIFICANDO LIBNDS ===" \
+    && ls -la /opt/devkitpro/libnds/lib/ \
+    && test -f /opt/devkitpro/libnds/lib/libnds9.a \
+    && echo "=== LIBNDS9 ENCONTRADO! ==="
 
-# Python
+# Python e pip
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
@@ -36,18 +36,15 @@ RUN python3 -m pip install \
 
 COPY . /app
 
-# Verificação final do ambiente
+# Verificação final das ferramentas
 RUN echo "=== VERIFICANDO FERRAMENTAS ===" \
     && which arm-none-eabi-gcc \
     && arm-none-eabi-gcc --version \
     && which make \
     && make --version \
-    && which ndstool \
-    && ndstool --version || true
-
-RUN echo "=== VERIFICANDO LIBNDS ===" \
-    && test -f /opt/devkitpro/libnds/lib/libnds9.a \
-    && echo "libnds9.a encontrado!"
+    && (which ndstool || true) \
+    && (ndstool --version || true) \
+    && echo "=== BUILDER PRONTO ==="
 
 EXPOSE 10000
 
