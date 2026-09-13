@@ -9,29 +9,45 @@ ENV PATH=/opt/devkitpro/devkitARM/bin:/opt/devkitpro/tools/bin:/opt/devkitpro/pa
 ENV PYTHONUNBUFFERED=1
 ENV PORT=10000
 
+# Instala as ferramentas e bibliotecas necessárias para Nintendo DS
 RUN dkp-pacman -Sy --noconfirm nds-dev \
     && dkp-pacman -S --noconfirm ndstool \
+    && echo "=== VERIFICANDO LIBNDS ===" \
+    && find /opt/devkitpro -name "libnds9.a" -print \
+    && test -f /opt/devkitpro/libnds/lib/libnds9.a \
+    && echo "libnds9.a OK" \
     && dkp-pacman -Scc --noconfirm
 
-RUN find /opt/devkitpro -type f -name ndstool -exec ln -sf {} /usr/local/bin/ndstool \; || true
+# Garante que o ndstool esteja disponível no PATH
+RUN find /opt/devkitpro -type f -name ndstool \
+    -exec ln -sf {} /usr/local/bin/ndstool \; || true
 
+# Python
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /tmp/requirements.txt
 
-RUN python3 -m pip install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
+RUN python3 -m pip install \
+    --no-cache-dir \
+    --break-system-packages \
+    -r /tmp/requirements.txt
 
 COPY . /app
 
+# Verificação final do ambiente
 RUN echo "=== VERIFICANDO FERRAMENTAS ===" \
     && which arm-none-eabi-gcc \
     && arm-none-eabi-gcc --version \
     && which make \
     && make --version \
-    && (which ndstool || true) \
-    && (ndstool --version || true)
+    && which ndstool \
+    && ndstool --version || true
+
+RUN echo "=== VERIFICANDO LIBNDS ===" \
+    && test -f /opt/devkitpro/libnds/lib/libnds9.a \
+    && echo "libnds9.a encontrado!"
 
 EXPOSE 10000
 
